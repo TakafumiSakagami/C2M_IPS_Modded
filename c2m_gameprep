@@ -1,0 +1,743 @@
+#!/bin/sh
+# 
+# * Convert and make cartdumps ready to play.
+# * Imports roms from roms dir
+# * Creates shortcut to hakchi games on usb
+# * Imports and converts "original games" so they are accessable via c2m home/root menu.
+# * Imports saves for original games
+#
+
+#set -x
+
+echo
+echo
+echo ----------------------- c2m gameprep start ---------------------------
+echo
+echo
+
+
+# comment out to remove roms from romdir after importing
+#keep_roms="1"
+
+modname="hakchi"
+mountpoint="/newroot"
+orig_rootfs="$mountpoint"
+new_rootfs="$mountpoint/var/lib/hakchi/rootfs"
+nand_saves="$mountpoint/var/lib/clover/profiles/0"
+
+sftype="nes"
+sfregion="usa"
+[ "$(cat "$orig_rootfs/etc/clover/boardtype")" = "dp-shvc" ] && sftype="snes"
+grep -qF "dp-hvcj" "$orig_rootfs/etc/issue" && sftype="hvcj"
+[ "$(cat "$orig_rootfs/etc/clover/REGION")" = "JPN" ] && sfregion="jpn"
+[ "$(cat "$orig_rootfs/etc/clover/REGION")" = "EUR" ] && sfregion="eur"
+
+usb_root="$mountpoint/media"
+usb_hakchi="$usb_root/hakchi"
+usb_hakchi_games="$usb_hakchi/games"
+usb_saves="$usb_root/hakchi/saves"
+
+usb_c2m="$usb_root/c2m"
+usb_c2m_bin="$usb_root/c2m/bin"
+usb_c2m_games="$usb_c2m/games"
+usb_c2m_games_root="$usb_c2m_games/000"
+usb_c2m_games_original_dir="$usb_c2m_games/0ORIG"
+usb_c2m_games_faves_dir="$usb_c2m_games/0FAVE"
+usb_c2m_games_rand_dir="$usb_c2m_games/0RAND"
+usb_c2m_games_settings_dir="$usb_c2m_games/0SETT"
+usb_c2m_roms="$usb_c2m/roms"
+usb_c2m_roms_faves="$usb_c2m/roms/faves"
+usb_c2mromtool_dir="$usb_c2m/c2mromtool"
+usb_c2mromtool_data="$usb_c2m/c2mromtool/data"
+usb_c2mromtool_templates="$usb_c2m/c2mromtool/data/templates"
+usb_c2mromtool_boxart="$usb_c2m/c2mromtool/data/boxart"
+usb_c2mromtool_settings="$usb_c2m/c2mromtool/data/settings"
+usb_c2mromtool_skin="$usb_c2m/c2mromtool/data/""$(cat "$usb_c2m"/c2mromtool/data/skin)"
+usb_c2mromtool_skin_misc="$usb_c2mromtool_skin/0misc"
+usb_c2mromtool="$usb_c2mromtool_dir/c2mromtool"
+
+cartdump_filename="$(cat $usb_c2m/cartdumps/current.txt)"
+cartdump_filepath="$usb_root/$cartdump_filename"
+gamecode_hakchi=CLV-S-0HAKC
+gamecode_original=CLV-S-0ORIG
+gamecode_fave=CLV-S-0FAVE
+gamecode_rand=CLV-S-0RAND
+gamecode_settings=CLV-S-0SETT
+gamecode_back=CLV-S-0BACK
+
+# Reset
+Color_Off="\e[33;0m"       # Text Reset
+
+# Regular Colors
+Black="\e[33;0;30m"        # Black
+Red="\e[33;0;31m"          # Red
+Green="\e[33;0;32m"        # Green
+Yellow="\e[33;0;33m"       # Yellow
+Blue="\e[33;0;34m"         # Blue
+Purple="\e[33;0;35m"       # Purple
+Cyan="\e[33;0;36m"         # Cyan
+White="\e[33;0;37m"        # White
+
+
+containsGames(){
+  [ -d "$1" ] || return 1
+  [ -z "$(cd "$1";ls CLV-* 2>/dev/null)" ] && return 1
+  return 0
+}
+
+checkGamepath(){
+	containsGames "$1" && echo "$1" && return 0
+	return 1
+}
+
+findGameStorage(){
+	local subdir=$1
+	checkGamepath "$mountpoint/media/$modname/games/$sftype-$sfregion/$subdir" && return 0
+	checkGamepath "$mountpoint/media/$modname/games/$sftype/$subdir" && return 0
+	checkGamepath "$mountpoint/media/$modname/games/$subdir" && return 0
+	return 1
+}
+
+
+usb_hakchi_games_root="$(findGameStorage "000")"
+usb_hakchi_games_other="$(findGameStorage "001")"
+
+snes_rootfs_games="$orig_rootfs/usr/share/games"
+nes_rootfs_games="$orig_rootfs/usr/share/games/nes/kachikachi"
+rootfs_games=""
+if containsGames "$nes_rootfs_games"; then
+	rootfs_games="$nes_rootfs_games"
+fi
+if containsGames "$snes_rootfs_games"; then
+	rootfs_games="$snes_rootfs_games"
+fi
+echo rootfs_games is $rootfs_games
+
+
+stopTask(){
+  local tokill="false"
+  if [ "$1" = "-f" ]; then
+    tokill="true"
+    shift
+  fi
+  local pid="$(pidof "$1")"
+  [ -z "$pid" ] && return 0
+  "$tokill" && kill "$pid"
+  wait "$pid"
+}
+
+waitTask(){
+	local A="stopTask ${1+"$@"}"
+	trap "$A" EXIT
+}
+
+showImage(){
+	local image="$(eval echo "$1")"
+	[ -f "$image" ] || return 1
+	decodepng "$image" > "/dev/fb0" &
+	waitTask decodepng
+	return 0
+}
+
+import_logo_num="1"
+toggleImportingLogo_old(){
+	echo toggleImportingLogo
+	local img1="$usb_c2m"/init/importingdot1.png
+	local img2="$usb_c2m"/init/importingdot2.png
+	local img3="$usb_c2m"/init/importingdot3.png
+	if [ "$import_logo_num" = "1" ]; then
+		import_logo_num="2"
+		showImage "$img1"
+	elif [ "$import_logo_num" = "2" ]; then
+		import_logo_num="3"
+		showImage "$img2"
+	elif [ "$import_logo_num" = "3" ]; then
+		import_logo_num="1"
+		showImage "$img3"
+	fi
+	return 0
+}
+# changed to just show the logo the first time this is called
+toggleImportingLogo(){
+	if [ "$import_logo_num" != "1" ]; then
+	  return 0
+	fi
+	import_logo_num="2"
+	
+	showImage "$usb_c2m"/init/importblack.png
+	echo toggleImportingLogo
+	echo  | tee /dev/tty0
+	return 0
+}
+
+copy_in_shortcut(){
+	local outdir="$1"
+	local sc_gamecode="$2"
+	local sc_name="$3"
+	
+	cp -rf "$usb_c2mromtool_templates/$sc_gamecode" "$outdir/"
+	# convert image to normal and small images
+	convertImageBoth "$usb_c2mromtool_skin_misc/$sc_name".png "$outdir/$sc_gamecode/$sc_gamecode".png "$outdir/$sc_gamecode/$sc_gamecode"_small.png
+}
+
+
+ALIGN_NONE=0
+
+ALIGN_LEFT=11		# left most
+ALIGN_LEFT1=11		# left most
+ALIGN_LEFT2=12		# 2nd from left
+ALIGN_LEFT3=13		# 3rd from left
+ALIGN_LEFT4=14		# 4th from left
+ALIGN_LEFT5=15		# 5th from left
+ALIGN_LEFT6=16		# 6th from left
+ALIGN_LEFT7=17		# 7th from left
+ALIGN_LEFT8=18		# 8th from left
+ALIGN_LEFT9=19		# 9th from left
+ALIGN_LEFT_LAST=19	# last left alignment
+
+ALIGN_RIGHT=21		# right most
+ALIGN_RIGHT1=21		# right most
+ALIGN_RIGHT2=22		# 2rd from right
+ALIGN_RIGHT3=23		# 3th from right
+ALIGN_RIGHT4=24		# 4th from right
+ALIGN_RIGHT5=25		# 5th from right
+ALIGN_RIGHT6=26		# 6th from right
+ALIGN_RIGHT7=27		# 7th from right
+ALIGN_RIGHT8=28		# 8th from right
+ALIGN_RIGHT9=29		# 9th from right
+ALIGN_RIGHT_LAST=29	# last right alignment
+
+create_shortcut(){
+	local outdir="$1"
+	local sc_gamecode="$2"
+	local sc_image="$3"
+	local sc_name="$4"
+	local sc_exec="$5"
+	local sc_align="$6"
+	local shortcut_dir="$outdir$sc_gamecode"
+	local desktop_filename="$shortcut_dir/$sc_gamecode.desktop"
+	local sc_name_lower=$(echo "$sc_name" | tr '[:upper:]' '[:lower:]')
+	
+#	cp -rf "$usb_c2mromtool_templates/$sc_gamecode" "$outdir/"
+#	cp "$usb_c2mromtool_skin_misc/$sc_name".png       "$outdir/$sc_gamecode/$sc_gamecode".png
+#	cp "$usb_c2mromtool_skin_misc/$sc_name"_small.png "$outdir/$sc_gamecode/$sc_gamecode"_small.png
+	
+	sc_align_prefix=""
+	sc_align_date="1990-00-00"
+	if [ "$sc_align" -ge $ALIGN_LEFT ] && [ "$sc_align" -le $ALIGN_LEFT_LAST ]; then
+		num_symbols=$((ALIGN_LEFT_LAST-sc_align+1))
+		i=0
+		while [ $i -lt $num_symbols ]; do
+			sc_align_prefix="$sc_align_prefix"$'\001'
+#			(( i++ ))
+			let i++
+		done
+		sc_align_date="$((1900+sc_align))-00-00"
+	fi
+	if [ "$sc_align" -ge $ALIGN_RIGHT ] && [ "$sc_align" -le $ALIGN_RIGHT_LAST ]; then
+		num_symbols=$((ALIGN_RIGHT_LAST-sc_align+1))
+		i=0
+		while [ $i -lt $num_symbols ]; do
+			sc_align_prefix="$sc_align_prefix~"
+#			(( i++ ))
+			let i++
+		done
+		sc_align_date="$((9900+num_symbols))-00-00"
+	fi
+	
+	mkdir -p "$shortcut_dir"
+	rm "$desktop_filename" 2> /dev/null
+#	touch "$desktop_filename"
+	{
+		echo "[Desktop Entry]"
+		echo "Type=Application"
+		echo "Exec=$sc_exec"
+		echo "Path=/var/saves/FOLDER"
+		echo "Name=$sc_name"
+		echo "Icon=/var/games/$sc_gamecode/$sc_gamecode.png"
+		echo ""
+		echo "[X-CLOVER Game]"
+		echo "Code=$sc_gamecode"
+		echo "TestID=0"
+		echo "ID=0"
+		echo "Players=1"
+		echo "Simultaneous=0"
+		echo "ReleaseDate=$sc_align_date"
+		echo "SaveCount=0"
+		echo "SortRawTitle=$sc_align_prefix$sc_name_lower"
+		echo "SortRawPublisher=$sc_align_prefix"X
+		echo "Copyright=X" 
+	} > "$desktop_filename"
+
+	# convert image to normal and small images
+	convertImageBoth "$usb_c2mromtool_skin_misc/$sc_image".png "$shortcut_dir/$sc_gamecode".png "$shortcut_dir/$sc_gamecode"_small.png
+}
+
+create_back_shortcut(){
+	local outdir="$1"
+	[ -d "$outdir/$gamecode_back" ] || create_shortcut "$outdir" "$gamecode_back"     back     "Back" "/bin/chmenu 000 /var/games" $ALIGN_LEFT1
+}
+
+create_fave_shortcut(){
+	local outdir="$1"
+	[ -d "$outdir/$gamecode_fave" ] || create_shortcut "$outdir" "$gamecode_fave"     fave     "Favourite Games" "/bin/chmenu 0FAVE /var/games" $ALIGN_LEFT2
+}
+
+create_rand_shortcut(){
+	local outdir="$1"
+	[ -d "$outdir/$gamecode_rand" ] || create_shortcut "$outdir" "$gamecode_rand"     rand     "Random Game" "/media/c2m/games/0RAND/randgame.sh 000" $ALIGN_LEFT2
+}
+
+create_orig_shortcut(){
+	local outdir="$1"
+	[ -d "$outdir/$gamecode_original" ] || create_shortcut "$outdir" "$gamecode_original" original "Original Games" "/bin/chmenu 0ORIG /var/games" $ALIGN_LEFT3
+}
+
+create_hakchi_shortcut(){
+	local outdir="$1"
+	[ -d "$outdir/$gamecode_hakchi" ] || create_shortcut "$outdir" "$gamecode_hakchi"   hakchi   "Hakchi" "/bin/chmenu 001 /var/games" $ALIGN_LEFT4
+}
+
+create_settings_shortcut(){
+	local outdir="$1"
+	[ -d "$outdir/$gamecode_settings" ] || create_shortcut "$outdir" "$gamecode_settings" settings "Settings" "/bin/chmenu 0SETT /var/games" $ALIGN_RIGHT
+}
+
+containsCartdump(){
+	[ -d "$1" ] || return 1
+	[ -z "$(cd "$1";ls cartdump 2>/dev/null)" ] && return 1
+	return 0
+}
+
+findCartdump(){
+	local basedir="$1"
+	[ -d "$basedir" ] || return 1
+	for subdir in "$basedir"/*/ ; do
+		local cartdump_dir="$subdir"
+		containsCartdump "$cartdump_dir" && echo "$cartdump_dir" && return 0
+	done
+	return 1
+}
+
+removeAllCartdumps(){
+	local basedir="$1"
+	[ -d "$basedir" ] || return 1
+	for dir in "$basedir"/*/ ; do
+		if containsCartdump "$dir"; then
+			rm -rf "$dir"
+		fi
+	done
+	return 0
+}
+
+convertBoxartBig() {
+	local infile="$1"
+	local outfile="$2"
+	convert "$infile"'[228x202]' "$outfile"
+}
+
+convertBoxartSmall() {
+	local infile="$1"
+	local outfile="$2"
+	convert "$infile"'[40x40]' "$outfile"
+}
+
+convertImageBoth() {
+	local infile="$1"
+	local outfilebig="$2"
+	local outfilesmall="$3"
+	convert "$infile"'[228x202]' "$outfilebig"
+	convert "$infile"'[40x40]'   "$outfilesmall"
+}
+
+prepareSettings() {
+	local outdir="$1"
+	local src_scriptspath="$2"
+	
+	[ -d "$outdir" ] || mkdir -p "$outdir"
+	create_settings_shortcut "$usb_c2m_games_root/"
+	create_back_shortcut "$outdir/"
+	
+	# remove all settings that are not available in source settings dir
+	for installed_scriptpath in "$outdir"/CLV-S-00???/*.sh; do
+		if [ -f "$installed_scriptpath" ]; then
+			installed_script="$(basename "$installed_scriptpath")"
+			is_available=0
+			for available_scriptpath in "$src_scriptspath"/*.sh; do
+				available_script="$(basename "$available_scriptpath")"
+				available_script="$(echo "$available_script" | sed -e 's/ /_/g')"
+				if [ "$available_script" = "$installed_script" ]; then
+					is_available=1
+					break
+				fi
+			done
+			if [ "$is_available" -eq 0 ]; then
+				basedir="$(dirname "$installed_scriptpath")"
+				echo "removing setting $basedir"
+				rm -rf "$basedir"
+			fi
+		fi
+	done
+	
+	# add all settings from source settings dir that are not already installed
+	gamecode_num=1
+	for available_scriptpath in "$src_scriptspath"/*.sh; do
+		if [ -f "$available_scriptpath" ]; then
+			available_script="$(basename "$available_scriptpath")"
+			local filename="$available_script"
+			name="${available_script%.*}"
+			available_script="$(echo "$available_script" | sed -e 's/ /_/g')"
+			is_installed=0
+			for installed_scriptpath in "$outdir"/CLV-S-00???/*.sh; do
+				installed_script="$(basename "$installed_scriptpath")"
+				if [ "$available_script" = "$installed_script" ]; then
+					is_installed=1
+					# if it is installed, check that the script hasn't changed
+					if ! diff -q "$available_scriptpath" "$installed_scriptpath" &>/dev/null; then
+						echo "updating setting $installed_scriptpath"
+						cp "$available_scriptpath" "$installed_scriptpath"
+						chmod +x "$installed_scriptpath"
+					fi
+					break
+				fi
+			done
+			
+			if [ "$is_installed" -eq 0 ]; then
+				# get next gamecode to use
+				while true; do
+					gamecode=$(printf "CLV-S-%05d" $gamecode_num)
+					let gamecode_num++
+					if ! [ -d "$outdir/$gamecode" ]; then
+						break
+					fi
+				done
+				local srcdir="$src_scriptspath"
+				local destdir="$outdir/$gamecode"
+				mkdir -p "$destdir"
+				
+				dest_script_filepath="$destdir/$available_script"
+				toggleImportingLogo
+				echo "      creating setting $dest_script_filepath" | tee /dev/tty0
+				
+				create_shortcut "$outdir/" "$gamecode" settings "$name" "/var/games/$gamecode/$available_script" $ALIGN_NONE
+				dos2unix "$available_scriptpath"
+				cp "$available_scriptpath" "$dest_script_filepath"
+				chmod +x "$dest_script_filepath"
+				
+				# copy over any special icon/boxart image
+				local img_src_filepath="$srcdir/${filename%.*}".png
+				[ -f "$img_src_filepath" ] || img_src_filepath="$destdir/${filename%.*}".jpg
+				if [ -f "$img_src_filepath" ]; then
+					convertImageBoth "$img_src_filepath" "$destdir/$gamecode.png" "$destdir/$gamecode"_small.png
+				fi
+			fi
+		fi
+	done
+}
+
+importGame() {
+	local romfilepath="$1"
+	local outdir="$2"
+	local is_fave="$3"
+	local baddir="$4"
+	local gooddir="$5"
+	
+	local filename="$(basename "$romfilepath")"
+	local basedir="$(dirname "$romfilepath")"
+#	echo "importGame filename = $filename"
+#	echo "importGame basedir = $basedir"
+	
+	# Turn on a case-insensitive matching (-s set nocasematch)
+	case "$filename" in
+	*.[Pp][Nn][Gg]) echo "ignoring png  file: $filename" ;;
+	*.[Jj][Pp][Gg]) echo "ignoring jpg  file: $filename" ;;
+	*.[Jj][Ss][Oo][Nn]) echo "ignoring json file: $filename" ;;
+	readme.txt) echo "ignoring readme file: $filename" ;;
+	*)
+		# check for image or database files for this rom
+		local db_filepath="$basedir/${filename%.*}".json
+#		echo "importGame db_filepath = $db_filepath"
+		[ -f "$db_filepath" ] || db_filepath=""
+		local img_filepath="$basedir/${filename%.*}".png
+#		echo "importGame img_filepath = $img_filepath"
+		[ -f "$img_filepath" ] || img_filepath="$basedir/${filename%.*}".jpg
+#		echo "importGame img_filepath = $img_filepath"
+		[ -f "$img_filepath" ] || img_filepath=""
+#		echo "importGame img_filepath = $img_filepath"
+		# prepare image and data base params
+		local db_param=""
+		local img_param=""
+		[ -f "$db_filepath"  ] && db_param="-j$db_filepath"
+		[ -f "$img_filepath" ] && img_param="-y$img_filepath"
+		# do it
+		toggleImportingLogo
+		if [ "$is_fave" = 0 ]; then
+			# not fave game
+			echo "      importing game $filename" | tee /dev/tty0
+			outdir_param="-e$outdir"
+		else
+			# is fave game
+			echo "      importing fave game $filename" | tee /dev/tty0
+			outdir_param="-d$outdir"
+		fi
+		mkdir -p "$outdir"
+#		echo c2romtool cmdline:
+#		echo "$usb_c2mromtool" -x "$usb_c2mromtool_data" -r "$romfilepath" "$outdir_param" "$db_param" "$img_param"
+		if "$usb_c2mromtool" -x "$usb_c2mromtool_data" -r "$romfilepath" "$outdir_param" "$db_param" "$img_param"; then
+			if [ -z "$keep_roms" ]; then
+				rm "$romfilepath"
+				[ -z "$img_filepath" ] || rm "$img_filepath"
+				[ -z "$db_filepath"  ] || rm "$db_filepath"
+			else
+				mkdir -p "$gooddir"
+				mv "$romfilepath"  "$gooddir"
+				[ -z "$img_filepath" ] || mv "$img_filepath" "$gooddir"
+				[ -z "$db_filepath"  ] || mv "$db_filepath"  "$gooddir"
+			fi
+		else
+			mkdir -p "$baddir"
+			mv "$romfilepath"  "$baddir"
+			[ -z "$img_filepath" ] || mv "$img_filepath" "$baddir"
+			[ -z "$db_filepath"  ] || mv "$db_filepath"  "$baddir"
+		fi
+	esac
+}
+
+importAllGames(){
+	local indir="$1"
+	local outdir="$2"
+	local baddir="$indir"/bad
+	local gooddir="$indir"/good
+	
+	# import/convert general games
+	if [ -d "$indir" ]; then
+		for romfilepath in "$indir"/* ; do
+			if [ -f "$romfilepath" ]; then
+				importGame "$romfilepath" "$outdir" 0 "$baddir" "$gooddir"
+			fi
+		done
+		mv "$indir"/*.json "$baddir" 2>/dev/null
+		mv "$indir"/*.png "$baddir" 2>/dev/null
+		mv "$indir"/*.jpg "$baddir" 2>/dev/null
+	fi
+}
+
+importFaveGames(){
+	local indir="$1"
+	local outdir="$2"
+	local baddir="$indir"/bad
+	local gooddir="$indir"/good
+	
+	# import/convert fave games
+	if [ -d "$indir" ]; then
+		for romfilepath in "$indir"/* ; do
+			if [ -f "$romfilepath" ]; then
+				importGame "$romfilepath" "$outdir" 1 "$baddir" "$gooddir"
+			fi
+		done
+	fi
+	
+	# create shortcuts if games exist in output dir
+	if containsGames "$outdir"; then
+		# add shortcut to fave games from root
+		create_fave_shortcut "$usb_c2m_games_root/"
+		# add shortcut to root from fave games
+		create_back_shortcut "$outdir/"
+	# remove shortcuts if they don't exist
+	else
+		rm -rf "${usb_c2m_games_root:?}/${gamecode_fave:?}"
+		rm -rf "$outdir"
+	fi
+}
+
+importOriginalGames(){
+	local indir="$1"
+	local outdir="$usb_c2m_games_original_dir"
+	
+	# import/convert original games
+	if [ -d "$indir" ]; then
+		# create output dir if it doesnt exist
+		[ -d "$outdir" ] || mkdir -p "$outdir"
+		
+		# check each game that is currently in the original games dir
+		# to ensure it exists on the current system.
+		# if it does not exist, then remove the game.
+		echo removing originals
+		for gamedir in "$outdir"/CLV-*/ ; do
+			local gamecode="$(basename "$gamedir")"
+			if ! [ -d "$indir/$gamecode" ] && [ -d "gamedir" ] && [ "$gamecode" != "$gamecode_back" ]; then
+				toggleImportingLogo
+				echo "      removing original game $gamedir" | tee /dev/tty0
+				rm -rf "$gamedir"
+			fi
+		done
+		
+		# copy in original games if they dont already exist
+		echo copying in originals
+		for gamedir in "$indir"/CLV-*/ ; do
+			local gamecode="$(basename "$gamedir")"
+			local desktop="$outdir/$gamecode/$gamecode.desktop"
+			if ! [ -d "$outdir/$gamecode" ]; then
+				toggleImportingLogo
+				echo "      importing original game $gamedir" | tee /dev/tty0
+				cp -rf "$gamedir" "$outdir/"
+				# patch rompath and icon path
+				sed -i.bak 's#/usr/share/games/nes/kachikachi#/var/games#g' "$desktop"
+				sed -i.bak 's#/usr/share/games#/var/games#g' "$desktop"
+				# patch savepath
+				sed -i.bak 's#/var/lib/clover/profiles/0/#/var/saves#g' "$desktop"
+				# remove temp file
+				rm -f "$desktop".bak
+			fi
+		done
+		
+		# copy across savegames - only if they dont already exist!
+		echo copying original savegames
+		# unmount the usb saves overmount so we can access the saves on nand
+		if mountpoint -q $nand_saves; then
+			umount $nand_saves || umount -f $nand_saves
+		else
+			umount $nand_saves 2>/dev/null
+		fi
+		# handle game saves
+		for gamedir in "$indir"/CLV-*/ ; do
+#			echo "checking savegame $gamedir"
+			local gamecode="$(basename "$gamedir")"
+			local savedir="$nand_saves/$gamecode/"
+			if ! [ -d "$usb_saves/$gamecode" ] || [ -z "$(ls -A "$usb_saves/$gamecode")" ]; then
+				if [ -d "$savedir" ] && ! [ -z "$(ls -A "$savedir")" ]; then
+					toggleImportingLogo
+					echo "      importing original save $savedir" | tee /dev/tty0
+					cp -rf "$savedir" "$usb_saves/"
+				fi
+			fi
+		done
+		# handle system menu save
+		local gamecode="home-menu"
+		echo "checking savegame $gamecode"
+		local savedir="$nand_saves/$gamecode/"
+		if ! [ -d "$usb_saves/$gamecode" ] || [ -z "$(ls -A "$usb_saves/$gamecode")" ]; then
+			if [ -d "$savedir" ] && ! [ -z "$(ls -A "$savedir")" ]; then
+				echo copying in savegame "$gamecode" from "$savedir" to "$usb_saves/"
+				toggleImportingLogo
+				echo "      importing original save $savedir" | tee /dev/tty0
+				cp -rf "$savedir" "$usb_saves/"
+			fi
+		fi
+		# remount the usb saves overmount
+		mount -o bind "$usb_saves" "$nand_saves"
+	else
+		# input dir didn't exist, so remove all original games
+		rm -rf "$outdir"
+	fi
+	
+	# create shortcuts if games exist in output dir
+	if containsGames "$outdir"; then
+		echo creating original games shortcuts
+		# add shortcut to original games from root
+		create_orig_shortcut "$usb_c2m_games_root/"
+		# add shortcut to root from original games
+		create_back_shortcut "$outdir/"
+	# remove shortcuts if no games exist
+	else
+		echo removing original games shortcuts
+		rm -rf "${usb_c2m_games_root:?}/${gamecode_original:?}"
+		rm -rf "$outdir"
+	fi
+}
+
+
+do_gameprep(){
+	# general init
+	PATH="$PATH:$usb_c2m_bin"
+	mkdir -p "$usb_c2m_games_root"
+	mkdir -p "$usb_saves"
+	
+	
+	## prepare settings shortcuts
+	#prepareSettings "$usb_c2m_games_settings_dir" "$usb_c2mromtool_settings"
+	
+	# copy across original games
+	echo 
+	echo preparing original games
+	importOriginalGames "$rootfs_games" 
+	
+	
+	## prepare random shortcut
+	#echo 
+	#echo preparing random shortcut
+	## add random dir
+	#[ -d "$usb_c2m_games_rand_dir" ] || cp -rf "$usb_c2mromtool_templates/0RAND" "$usb_c2m_games/"
+	## add shortcut to random from root
+	#create_rand_shortcut "$usb_c2m_games_root/"
+	## add shortcut to root from random
+	#create_back_shortcut "$usb_c2m_games_rand_dir/"
+	
+	
+	# prepare hakchi shortcut
+	echo 
+	echo preparing hakchi shortcut for "$usb_hakchi_games_other"
+	# create shortcuts if games exist in output dir
+	if containsGames "$usb_hakchi_games_other"; then
+		# add shortcut to hakchi games
+		if ! [ -d "$usb_c2m_games_root/$gamecode_hakchi" ]; then
+			create_hakchi_shortcut "$usb_c2m_games_root/"
+			
+			# TODO: patch hakchi 001 desktop file to say "Back" (instead of "Original games")
+			# But maybe we should not touch any Hakchi game content since it is not "ours"...
+		fi
+	else
+		# remove shortcut to hakchi games
+		rm -rf "${usb_c2m_games_root:?}/${gamecode_hakchi:?}"
+	fi
+	
+	
+	# remove old cartdumps and prepare new cartdump
+	echo 
+	echo preparing cartdump
+	removeAllCartdumps "$usb_c2m_games_root"
+	if ! [ -z "$cartdump_filename" ]; then
+		echo current cartdump_filepath is: "$cartdump_filepath"
+		echo adding new cartdump
+		#echo "      importing gamecart" | tee /dev/tty0
+		"$usb_c2mromtool" -r "$cartdump_filepath" -d "$usb_c2m_games_root" -z "d" -c1
+        local cartdump_dir="$(dirname "$cartdump_filepath")"
+        local cartdump_base="$(basename "$cartdump_filepath" .sfc)"
+        local ips_filepath="$cartdump_dir/$cartdump_base.ips"
+        if [ -f "$ips_filepath" ]; then
+            echo "Copying IPS patch: $ips_filepath"
+            cp "$ips_filepath" "$usb_c2m_games_root"/CLV-U-*/
+        else
+            echo "No IPS patch found"
+        fi        
+		# make the cartdump be the currently selected game
+		echo 000 > "$usb_saves/hakchi/menu"
+	fi
+	
+	
+	# import new rom files
+	echo 
+	echo importing roms
+	importAllGames "$usb_c2m_roms" "$usb_c2m_games"
+	
+	
+	# import new rom favourite rom files
+	echo 
+	echo importing fave roms
+	importFaveGames "$usb_c2m_roms_faves" "$usb_c2m_games_faves_dir"
+	
+	# check settings file if current game in current dir still exists
+	# if not change that setting so it doesnt try to select a non-existant game
+	# TODO
+	
+	
+	echo
+	echo
+	echo ----------------------- c2m gameprep end ---------------------------
+	echo
+	echo
+}
+
+
+do_gameprep
+
