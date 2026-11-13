@@ -663,15 +663,15 @@ do_gameprep(){
 	importOriginalGames "$rootfs_games" 
 	
 	
-	## prepare random shortcut
-	#echo 
-	#echo preparing random shortcut
-	## add random dir
-	#[ -d "$usb_c2m_games_rand_dir" ] || cp -rf "$usb_c2mromtool_templates/0RAND" "$usb_c2m_games/"
-	## add shortcut to random from root
-	#create_rand_shortcut "$usb_c2m_games_root/"
-	## add shortcut to root from random
-	#create_back_shortcut "$usb_c2m_games_rand_dir/"
+	# prepare random shortcut
+	echo 
+	echo preparing random shortcut
+	# add random dir
+	[ -d "$usb_c2m_games_rand_dir" ] || cp -rf "$usb_c2mromtool_templates/0RAND" "$usb_c2m_games/"
+	# add shortcut to random from root
+	create_rand_shortcut "$usb_c2m_games_root/"
+	# add shortcut to root from random
+	create_back_shortcut "$usb_c2m_games_rand_dir/"
 	
 	
 	# prepare hakchi shortcut
